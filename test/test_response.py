@@ -591,6 +591,13 @@ class TestResponse(object):
         if name != "br" or brotli.__name__ == "brotlicffi":
             assert len(r._decoded_buffer) == 0
 
+        # Check that memory usage is still within the limit while the
+        # connection is being drained, meaning that the call does not
+        # decompress the whole content.
+        r.drain_conn()
+        assert r._decoder is None
+        assert len(r._decoded_buffer) == 0
+
     # A decompression bomb: ~8 MiB of zeroes behind a few kilobytes on the
     # wire. Only the zlib-based decoders are exercised here because they are
     # always available and because they honor the output limit exactly.
@@ -666,6 +673,54 @@ class TestResponse(object):
             count += 1
         assert total == expected_length
         assert count == expected_length // amt
+
+    def test_drain_conn_does_not_decode_content(self):
+        """
+        Draining a connection, e.g. a redirect response body that the caller
+        never reads, must not decompress the body. A malicious server could
+        otherwise amplify a few kilobytes on the wire into a huge allocation
+        without any read limit being applied.
+        """
+        compressed_data = gzip.compress(b"\0" * (8 * 2 ** 20))
+        fp = BytesIO(compressed_data)
+        r = HTTPResponse(
+            fp, headers={"content-encoding": "gzip"}, preload_content=False
+        )
+
+        with mock.patch("urllib3.response.GzipDecoder.decompress") as decompress:
+            r.drain_conn()
+
+        # This is the vulnerability: before the fix the whole 8 MiB were
+        # decompressed just for the result to be thrown away.
+        decompress.assert_not_called()
+        assert r._has_decoded_content is False
+        # The body is still read off the wire so the connection can be reused.
+        assert fp.tell() == len(compressed_data)
+
+    def test_drain_conn_does_not_decode_after_partial_read(self):
+        """
+        CVE-2026-44432: draining after a partial decoded read must not decode
+        the remainder either. `_has_decoded_content` being True is not a
+        licence to decompress everything that is left in a single operation.
+        """
+        compressed_data = gzip.compress(b"\0" * (8 * 2 ** 20))
+        fp = BytesIO(compressed_data)
+        r = HTTPResponse(
+            fp, headers={"content-encoding": "gzip"}, preload_content=False
+        )
+
+        assert r.read(1) == b"\0"
+        assert r._has_decoded_content is True
+
+        with mock.patch("urllib3.response.GzipDecoder.decompress") as decompress:
+            r.drain_conn()
+
+        decompress.assert_not_called()
+        # The decoder and its buffer are dropped so nothing is retained.
+        assert r._decoder is None
+        assert len(r._decoded_buffer) == 0
+        # The body is still read off the wire so the connection can be reused.
+        assert fp.tell() == len(compressed_data)
 
     @pytest.mark.parametrize(
         "compress_func",

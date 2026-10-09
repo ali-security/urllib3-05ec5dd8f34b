@@ -441,6 +441,7 @@ class HTTPResponse(io.IOBase):
         self.auto_close = auto_close
 
         self._decoder = None
+        self._has_decoded_content = False
         self._body = None
         self._fp = None
         self._original_response = original_response
@@ -503,9 +504,14 @@ class HTTPResponse(io.IOBase):
         Unread data in the HTTPResponse connection blocks the connection from being released back to the pool.
         """
         try:
-            self.read()
+            self._raw_read()
         except (HTTPError, SocketError, BaseSSLError, HTTPException):
             pass
+        if self._has_decoded_content:
+            # `_raw_read` skips decompression, so we should clean up the
+            # decoder to avoid keeping unnecessary data in memory.
+            self._decoded_buffer = BytesQueueBuffer()
+            self._decoder = None
 
     @property
     def data(self):
@@ -611,6 +617,11 @@ class HTTPResponse(io.IOBase):
         Decode the data passed in and potentially flush the decoder.
         """
         if not decode_content:
+            if self._has_decoded_content:
+                raise RuntimeError(
+                    "Calling read(decode_content=False) is not supported after "
+                    "read(decode_content=True) was called."
+                )
             return data
 
         if max_length is None or flush_decoder:
@@ -619,6 +630,7 @@ class HTTPResponse(io.IOBase):
         try:
             if self._decoder:
                 data = self._decoder.decompress(data, max_length=max_length)
+                self._has_decoded_content = True
         except self.DECODER_ERROR_CLASSES as e:
             content_encoding = self.headers.get("content-encoding", "").lower()
             raise DecodeError(
@@ -855,6 +867,11 @@ class HTTPResponse(io.IOBase):
         else:
             # do not waste memory on buffer when not decoding
             if not decode_content:
+                if self._has_decoded_content:
+                    raise RuntimeError(
+                        "Calling read(decode_content=False) is not supported after "
+                        "read(decode_content=True) was called."
+                    )
                 return data
 
             decoded_data = self._decode(

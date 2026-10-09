@@ -184,13 +184,24 @@ class TestingApp(RequestHandler):
         "Perform a redirect to ``target``"
         target = request.params.get("target", "/")
         status = request.params.get("status", "303 See Other")
+        compressed = request.params.get("compressed", b"") == b"true"
         if len(status) == 3:
             status = "%s Redirect" % status.decode("latin-1")
         elif isinstance(status, bytes):
             status = status.decode("latin-1")
 
         headers = [("Location", target)]
-        return Response(status=status, headers=headers)
+        if compressed:
+            headers.append(("Content-Encoding", "gzip"))
+            file_ = BytesIO()
+            with contextlib.closing(
+                gzip.GzipFile("", mode="w", fileobj=file_)
+            ) as zipfile:
+                zipfile.write(b"foo")
+            data = file_.getvalue()
+        else:
+            data = b""
+        return Response(data, status=status, headers=headers)
 
     def not_found(self, request):
         return Response("Not found", status="404 Not Found")
