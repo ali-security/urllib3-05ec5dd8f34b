@@ -39,6 +39,13 @@ from .util.response import is_fp_closed, is_response_to_head
 
 log = logging.getLogger(__name__)
 
+# Maximum length of a chunk-size line (and the trailing CRLF line) when reading a
+# chunked-transfer-encoded response. Matches ``http.client._MAXLINE`` so urllib3's
+# streaming path bounds these reads exactly like the stdlib ``.read()`` path does,
+# preventing a malicious server from forcing unbounded buffering (memory exhaustion)
+# via an unterminated chunk-size line.
+_MAX_CHUNK_LINE_LENGTH = 2 ** 16
+
 
 class DeflateDecoder(object):
     def __init__(self):
@@ -1050,7 +1057,12 @@ class HTTPResponse(io.IOBase):
         # we'll try to read it from socket.
         if self.chunk_left is not None:
             return
-        line = self._fp.fp.readline()
+        line = self._fp.fp.readline(_MAX_CHUNK_LINE_LENGTH + 1)
+        if len(line) > _MAX_CHUNK_LINE_LENGTH:
+            self.close()
+            raise ProtocolError(
+                "Response chunk size line exceeded maximum allowed length"
+            )
         line = line.split(b";", 1)[0]
         try:
             self.chunk_left = int(line, 16)
@@ -1147,7 +1159,11 @@ class HTTPResponse(io.IOBase):
 
             # Chunk content ends with \r\n: discard it.
             while True:
-                line = self._fp.fp.readline()
+                line = self._fp.fp.readline(_MAX_CHUNK_LINE_LENGTH + 1)
+                if len(line) > _MAX_CHUNK_LINE_LENGTH:
+                    raise ProtocolError(
+                        "Response chunk trailer line exceeded maximum allowed length"
+                    )
                 if not line:
                     # Some sites may not end with '\r\n'.
                     break
