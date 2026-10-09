@@ -193,6 +193,13 @@ class HTTPConnection(_HTTPConnection, object):
         # Google App Engine's httplib does not define _tunnel_host
         return getattr(self, "_tunnel_host", None)
 
+    @property
+    def proxy_is_forwarding(self):
+        """
+        Return True if a forwarding proxy is configured, else return False
+        """
+        return bool(self.proxy) and not self._is_using_tunnel()
+
     def _prepare_conn(self, conn):
         self.sock = conn
         if self._is_using_tunnel():
@@ -392,6 +399,22 @@ class HTTPSConnection(HTTPConnection):
                 SystemTimeWarning,
             )
 
+        # Forwarding proxies should use proxy-specific TLS policy for wrapping
+        # since the TLS connection being established is the one to the proxy,
+        # whereas tunneling proxies use the connection's TLS settings for the
+        # target. The target's SNI, hostname/fingerprint assertions and client
+        # certificate are never applied to the proxy handshake. For backwards
+        # compatibility, a forwarding proxy with no proxy SSL context falls back
+        # to the connection's SSL context until urllib3 v3.0 (a warning is
+        # emitted in ``ProxyManager.__init__``).
+        if self.proxy_is_forwarding and self.proxy_config is not None:
+            self.sock = self._connect_tls_proxy(hostname, conn)
+            # Forwarding proxies can never have a verified target since the
+            # proxy is the one doing the verification. Should instead use a
+            # CONNECT tunnel in order to verify the target.
+            self.is_verified = False
+            return
+
         # Wrap socket using verification with the root certs in
         # trusted_root_certs
         default_ssl_context = False
@@ -471,44 +494,66 @@ class HTTPSConnection(HTTPConnection):
                 )
             _match_hostname(cert, self.assert_hostname or server_hostname)
 
-        self.is_verified = (
+        is_verified = (
             context.verify_mode == ssl.CERT_REQUIRED
             or self.assert_fingerprint is not None
         )
 
+        # Forwarding proxies can never have a verified target since the proxy
+        # is the one doing the verification. Should instead use a CONNECT tunnel
+        # in order to verify the target.
+        if self.proxy_is_forwarding:
+            self.is_verified = False
+            # Set `self.proxy_is_verified` unless it's already set while
+            # establishing a tunnel.
+            if self.proxy_is_verified is None:
+                self.proxy_is_verified = is_verified
+        else:
+            self.is_verified = is_verified
+
     def _connect_tls_proxy(self, hostname, conn):
         """
-        Establish a TLS connection to the proxy using the provided SSL context.
+        Establish a TLS connection to the proxy using proxy-specific policy.
         """
         proxy_config = self.proxy_config
-        ssl_context = proxy_config.ssl_context
-        if ssl_context:
+        proxy_ssl_context = proxy_config.ssl_context
+        if proxy_ssl_context:
             # If the user provided a proxy context, we assume CA and client
-            # certificates have already been set
-            return ssl_wrap_socket(
+            # certificates have already been set. The proxy's own cert policy
+            # is used as-is: the context is never modified with the target's
+            # settings (cert_reqs, CA certificates, client certificate).
+            ssl_context = proxy_ssl_context
+            socket = ssl_wrap_socket(
                 sock=conn,
                 server_hostname=hostname,
                 ssl_context=ssl_context,
             )
+        else:
+            if self.proxy_is_forwarding and self.ssl_context is not None:
+                # Deprecated fallback: a forwarding proxy without a proxy SSL
+                # context inherits the connection's SSL context together with
+                # the pool's cert policy.
+                ssl_context = self.ssl_context
+                ssl_context.verify_mode = resolve_cert_reqs(self.cert_reqs)
+            else:
+                ssl_context = create_proxy_ssl_context(
+                    self.ssl_version,
+                    self.cert_reqs,
+                    self.ca_certs,
+                    self.ca_cert_dir,
+                    self.ca_cert_data,
+                )
 
-        ssl_context = create_proxy_ssl_context(
-            self.ssl_version,
-            self.cert_reqs,
-            self.ca_certs,
-            self.ca_cert_dir,
-            self.ca_cert_data,
-        )
-
-        # If no cert was provided, use only the default options for server
-        # certificate validation
-        socket = ssl_wrap_socket(
-            sock=conn,
-            ca_certs=self.ca_certs,
-            ca_cert_dir=self.ca_cert_dir,
-            ca_cert_data=self.ca_cert_data,
-            server_hostname=hostname,
-            ssl_context=ssl_context,
-        )
+            # If no cert was provided, use only the default options for server
+            # certificate validation
+            socket = ssl_wrap_socket(
+                sock=conn,
+                ca_certs=self.ca_certs,
+                ca_cert_dir=self.ca_cert_dir,
+                ca_cert_data=self.ca_cert_data,
+                server_hostname=hostname,
+                ssl_context=ssl_context,
+            )
 
         if ssl_context.verify_mode != ssl.CERT_NONE and not getattr(
             ssl_context, "check_hostname", False

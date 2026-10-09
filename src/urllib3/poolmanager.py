@@ -3,6 +3,7 @@ from __future__ import absolute_import
 import collections
 import functools
 import logging
+import warnings
 
 from ._collections import HTTPHeaderDict, RecentlyUsedContainer
 from .connectionpool import HTTPConnectionPool, HTTPSConnectionPool, port_by_scheme
@@ -496,13 +497,30 @@ class ProxyManager(PoolManager):
         if proxy.scheme not in ("http", "https"):
             raise ProxySchemeUnknown(proxy.scheme)
 
+        # Keep the deprecated ssl_context fallback on the manager for
+        # compatibility, while passing only explicit proxy policy to connections.
+        self.proxy_ssl_context = proxy_ssl_context
+        if (
+            use_forwarding_for_https
+            and proxy.scheme == "https"
+            and connection_pool_kw.get("ssl_context") is not None
+        ):
+            warnings.warn(
+                "Passing ssl_context when use_forwarding_for_https=True is deprecated "
+                "and will raise an error in urllib3 v3.0. "
+                "Use proxy_ssl_context to configure the TLS connection to the proxy.",
+                FutureWarning,
+                stacklevel=2,
+            )
+            if self.proxy_ssl_context is None:
+                self.proxy_ssl_context = connection_pool_kw.get("ssl_context")
+
         if not proxy.port:
             port = port_by_scheme.get(proxy.scheme, 80)
             proxy = proxy._replace(port=port)
 
         self.proxy = proxy
         self.proxy_headers = proxy_headers or {}
-        self.proxy_ssl_context = proxy_ssl_context
         self.proxy_config = ProxyConfig(proxy_ssl_context, use_forwarding_for_https)
 
         connection_pool_kw["_proxy"] = self.proxy

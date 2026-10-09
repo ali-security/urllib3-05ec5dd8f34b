@@ -1072,7 +1072,14 @@ class HTTPSConnectionPool(HTTPConnectionPool):
         if not getattr(conn, "sock", None):  # AppEngine might not have  `.sock`
             conn.connect()
 
-        if not conn.is_verified:
+        # A forwarding proxy verifies the proxy hop (``proxy_is_verified``) but
+        # deliberately reports the target as unverified (``is_verified`` False),
+        # since the proxy -- not urllib3 -- verifies the target. Only warn for
+        # forwarding connections when neither hop was verified.
+        if not conn.is_verified and not (
+            getattr(conn, "proxy_is_forwarding", False)
+            and getattr(conn, "proxy_is_verified", None)
+        ):
             warnings.warn(
                 (
                     "Unverified HTTPS request is being made to host '%s'. "
