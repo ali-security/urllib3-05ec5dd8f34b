@@ -346,6 +346,56 @@ class TestPoolManager(object):
         merged = p._merge_pool_kwargs({"invalid_key": None})
         assert p.connection_pool_kw == merged
 
+    def test_merge_pool_kwargs_retries(self):
+        """Assert a Retry instance given to the pool manager is kept as-is"""
+        retries = retry.Retry(total=100)
+        p = PoolManager(retries=retries)
+        merged = p._merge_pool_kwargs({"new_key": "value"})
+        assert {"retries": retries, "new_key": "value"} == merged
+
+    @pytest.mark.parametrize("retries", [0, 1, 100, None, True])
+    def test_pool_manager_retries_normalized(self, retries):
+        """Assert non-Retry ``retries`` values are normalized into a Retry
+        which raises MaxRetryError once the redirect budget is spent."""
+        p = PoolManager(retries=retries)
+        normalized = p.connection_pool_kw["retries"]
+        assert isinstance(normalized, retry.Retry)
+        # Requests made through a pool manager always pass redirect=False to
+        # the connection pool, so raise_on_redirect must not be turned off.
+        assert normalized.raise_on_redirect is True
+
+    def test_pool_manager_retries_normalized_int(self):
+        """Assert an integer ``retries`` is normalized without disabling redirects
+
+        urllib3#3655 reverted the 2.5.0 behaviour of forcing ``redirect=False``
+        here, because it stopped ``PoolManager(retries=<int>)`` following
+        redirects at all. ``redirect`` is left as None so it falls back to
+        ``total``, matching pristine urllib3.
+        """
+        p = PoolManager(retries=0)
+        normalized = p.connection_pool_kw["retries"]
+        assert isinstance(normalized, retry.Retry)
+        assert normalized.total == 0
+        assert normalized.redirect is None
+        assert normalized.raise_on_redirect is True
+
+    def test_pool_manager_retries_normalized_false(self):
+        """Assert ``retries=False`` doesn't raise MaxRetryError on redirects"""
+        p = PoolManager(retries=False)
+        normalized = p.connection_pool_kw["retries"]
+        assert isinstance(normalized, retry.Retry)
+        assert normalized.total is False
+        assert normalized.redirect == 0
+        assert normalized.raise_on_redirect is False
+
+    def test_pool_manager_retries_instance_unchanged(self):
+        """Assert a Retry instance is neither replaced nor mutated"""
+        retries = retry.Retry(total=3)
+        p = PoolManager(retries=retries)
+        assert p.connection_pool_kw["retries"] is retries
+        assert retries.redirect is None
+        assert retries.raise_on_redirect is True
+
     def test_pool_manager_no_url_absolute_form(self):
         """Valides we won't send a request with absolute form without a proxy"""
         p = PoolManager(strict=True)

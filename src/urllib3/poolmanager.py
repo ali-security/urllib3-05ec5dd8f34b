@@ -170,6 +170,19 @@ class PoolManager(RequestMethods):
 
     def __init__(self, num_pools=10, headers=None, **connection_pool_kw):
         RequestMethods.__init__(self, headers)
+        if "retries" in connection_pool_kw:
+            retries = connection_pool_kw["retries"]
+            if not isinstance(retries, Retry):
+                # Normalize an int/bool `retries` into a Retry instance so the
+                # pool-level value is honoured instead of being silently
+                # replaced by Retry.DEFAULT further down the stack.
+                # Deliberately does NOT force redirect=False here: doing so
+                # makes PoolManager(retries=<int>) refuse to follow redirects
+                # that plain urllib3 follows. Upstream reverted that overreach
+                # in urllib3/urllib3#3655.
+                retries = Retry.from_int(retries)
+                connection_pool_kw = connection_pool_kw.copy()
+                connection_pool_kw["retries"] = retries
         self.connection_pool_kw = connection_pool_kw
         self.pools = RecentlyUsedContainer(num_pools)
 
@@ -389,7 +402,7 @@ class PoolManager(RequestMethods):
             kw["body"] = None
             kw["headers"] = HTTPHeaderDict(kw["headers"])._prepare_for_method_change()
 
-        retries = kw.get("retries")
+        retries = kw.get("retries", response.retries)
         if not isinstance(retries, Retry):
             retries = Retry.from_int(retries, redirect=redirect)
 
