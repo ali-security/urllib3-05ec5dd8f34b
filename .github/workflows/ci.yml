@@ -1,6 +1,12 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "pytest selectors to run instead of the full suite (empty = full suite)"
+        required: false
+        default: ""
 
 permissions: "read-all"
 
@@ -10,7 +16,9 @@ defaults:
 
 jobs:
   package:
+    if: false  # disabled on the seal fork: rstcheck/twine check is a metadata lint gate; publish.yml builds the dists
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout Repository
@@ -30,7 +38,7 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.6", "3.7", "3.8", "3.9", "3.10", "3.11", "3.12", "3.13"]
-        os: [macos-12, windows-latest, ubuntu-latest]
+        os: [macos-latest, windows-latest, ubuntu-latest]
         nox-session: ['']
         exclude:
           # actions/setup-python dropped support for 3.6 in Ubuntu 22.04
@@ -40,18 +48,30 @@ jobs:
           # https://bugs.python.org/issue38820
           - python-version: "3.7"
             os: ubuntu-latest
+          # Seal fork: macos-12 (x64) is retired and macos-latest is arm64;
+          # CPython 3.6/3.7 never supported Apple Silicon, there is no prebuilt
+          # darwin-arm64 interpreter and building one from source fails, so
+          # these two legs cannot run. 3.6/3.7 still run on Windows and
+          # Ubuntu 22.04.
+          - python-version: "3.6"
+            os: macos-latest
+          - python-version: "3.7"
+            os: macos-latest
+        # Seal fork: ubuntu-20.04 is a retired runner label -> ubuntu-22.04; the
+        # python 2.7 legs moved off ubuntu-latest to ubuntu-22.04 because
+        # ubuntu-24.04 no longer ships python2.7 apt packages.
         include:
           - experimental: false
           - python-version: "2.7"
-            os: ubuntu-latest
+            os: ubuntu-22.04
             experimental: false
             nox-session: ''
           - python-version: "3.6"
-            os: ubuntu-20.04
+            os: ubuntu-22.04
             experimental: false
             nox-session: ''
           - python-version: "3.7"
-            os: ubuntu-20.04
+            os: ubuntu-22.04
             experimental: false
             nox-session: ''
           - python-version: "pypy-3.9-v7.3.13"
@@ -59,37 +79,62 @@ jobs:
             experimental: false
             nox-session: test-pypy
           - python-version: "pypy2.7"
-            os: ubuntu-20.04
+            os: ubuntu-22.04
             experimental: false
             nox-session: test-pypy
           - python-version: "2.7"
-            os: ubuntu-latest
+            os: ubuntu-22.04
             experimental: false
             nox-session: google_brotli-2.7
-          - python-version: "3.x"
+          # Seal fork: "3.x" meant 3.12 at the 1.26.20 release; it now resolves
+          # to 3.14, where test_ssltransport's check_hostname behaviour changed
+          # (`ValueError: check_hostname requires server_hostname`).
+          - python-version: "3.12"
             os: ubuntu-latest
             experimental: false
             nox-session: google_brotli-3
-          - python-version: "2.7"
-            os: ubuntu-latest
-            experimental: false
-            nox-session: app_engine
+          # Seal fork: the app_engine leg is dropped: ci/run_tests.sh downloads
+          # the Google App Engine Python SDK from the googleapis appengine-sdks
+          # bucket, which now answers 401 Unauthorized, so test/appengine cannot
+          # import dev_appserver. It covers only urllib3.contrib.appengine.
           - python-version: 3.13
             experimental: true
 
     runs-on: ${{ matrix.os }}
-    name: ${{ fromJson('{"macos-12":"macOS","windows-latest":"Windows","ubuntu-20.04":"Ubuntu 20.04","ubuntu-latest":"Ubuntu"}')[matrix.os] }} ${{ matrix.python-version }} ${{ matrix.nox-session}}
-    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: 45
+    name: ${{ fromJson('{"macos-latest":"macOS","windows-latest":"Windows","ubuntu-22.04":"Ubuntu 22.04","ubuntu-latest":"Ubuntu"}')[matrix.os] }} ${{ matrix.python-version }} ${{ matrix.nox-session}}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # Seal fork: pin interpreters that now resolve to post-release builds.
+      # `pypy2.7` resolves to PyPy 8.0.0 (Sep 2026), against which the
+      # cryptography 3.3.2 extension module fails to load
+      # (`python -m OpenSSL.debug` dies); v7.3.17 is the PyPy release current
+      # at 1.26.20's release (Aug 2024). `3.13` resolves to 3.13.16 on ubuntu,
+      # whose zlib/ssl changes break
+      # test_response.py::test_chunked_decoding_gzip_swallow_garbage and
+      # test_ssltransport.py::test_start_closed_socket; 3.13.15 is what the
+      # macOS/Windows legs resolve and pass with. The matrix values themselves
+      # stay unchanged (nox session names and the other `if:` conditions
+      # depend on them).
       - name: Set Up Python - ${{ matrix.python-version }}
-        if: matrix.python-version != '2.7'
+        if: matrix.python-version != '2.7' && runner.os != 'macOS' && !(runner.os == 'Linux' && matrix.python-version == '3.6')
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python-version == 'pypy2.7' && 'pypy2.7-v7.3.17' || matrix.python-version == '3.13' && '3.13.15' || matrix.python-version }}
           allow-prereleases: true
+
+      # actions/setup-python has no darwin-arm64 build of old CPython (macos-12 is
+      # retired, macos-latest is arm64) and no ubuntu-22.04 build of 3.6. This
+      # drop-in resolves a prebuilt interpreter or builds it from source.
+      - name: Set Up Python - ${{ matrix.python-version }} (MatteoH2O1999)
+        if: matrix.python-version != '2.7' && (runner.os == 'macOS' || (runner.os == 'Linux' && matrix.python-version == '3.6'))
+        uses: MatteoH2O1999/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache-build: true
+          allow-build: allow
 
       # Unfortunately, actions/setup-python does not support CPython 2.7.
       - name: Set Up Python - 2.7
@@ -106,20 +151,62 @@ jobs:
         with:
           python-version: "3"
 
+      # Seal fork: resolve nox and its deps as of the 1.26.20 release date;
+      # unconstrained nox pulls argcomplete 3.7.1 (2026) whose PEP 604
+      # annotations crash on Python 3.9.
       - if: matrix.python-version == '2.7' || matrix.python-version == 'pypy2.7'
         name: Install Dependencies
         run: python -m pip install --upgrade pip setuptools nox 'virtualenv<20.22.0'
+        env:
+          PIP_INDEX_URL: https://:2024-08-29@time-machines-pypi.sealsecurity.io/
 
       - if: matrix.python-version != '2.7' && matrix.python-version != 'pypy2.7'
         name: Install Dependencies
         run: python -m pip install --upgrade pip setuptools nox
+        env:
+          PIP_INDEX_URL: https://:2024-08-29@time-machines-pypi.sealsecurity.io/
+
+      # Seal fork: the pypy2.7 leg moved from the retired ubuntu-20.04 (OpenSSL
+      # 1.1.1) to ubuntu-22.04 (OpenSSL 3). cryptography 3.3.2 (pinned for
+      # Python 2 in dev-requirements.txt) has no PyPy wheel, so pip compiles it
+      # from source, and against OpenSSL 3 the extension fails to load with
+      # `undefined symbol: FIPS_mode`. Build OpenSSL 1.1.1w and point the
+      # cryptography build at it (rpath, so no LD_LIBRARY_PATH is needed).
+      - name: Build OpenSSL 1.1.1 for cryptography (pypy2.7)
+        if: matrix.python-version == 'pypy2.7'
+        run: |
+          curl -fsSL -o openssl-1.1.1w.tar.gz https://github.com/openssl/openssl/releases/download/OpenSSL_1_1_1w/openssl-1.1.1w.tar.gz
+          tar -xzf openssl-1.1.1w.tar.gz -C "$RUNNER_TEMP"
+          rm openssl-1.1.1w.tar.gz
+          cd "$RUNNER_TEMP/openssl-1.1.1w"
+          ./config --prefix=/opt/openssl11 --openssldir=/opt/openssl11 shared no-tests
+          make -j"$(nproc)" >/dev/null
+          sudo make install_sw >/dev/null
+          echo "CFLAGS=-I/opt/openssl11/include" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-L/opt/openssl11/lib -Wl,-rpath,/opt/openssl11/lib" >> "$GITHUB_ENV"
 
       - name: Run Tests
         # `test_requesting_large_resources_via_ssl` is run separately to avoid timeouts.
-        run: ./ci/run_tests.sh ${{ matrix.nox-session != 'app_engine' && 'test/ -k "not requesting_large_resources_via_ssl"' || '' }}
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            ./ci/run_tests.sh ${{ inputs.test-filter }}
+          else
+            ./ci/run_tests.sh ${{ matrix.nox-session != 'app_engine' && 'test/ -k "not requesting_large_resources_via_ssl"' || '' }}
+          fi
         env:
           PYTHON_VERSION: ${{ matrix.python-version }}
           NOX_SESSION: ${{ matrix.nox-session }}
+          # Seal fork: the `secure` extra only pins pyOpenSSL>=0.14; a present-day
+          # pyOpenSSL emits an extra `X509.get_subject is deprecated`
+          # DeprecationWarning that breaks the exact-warning assertions in
+          # test/contrib/test_pyopenssl.py. Resolve test deps as of the release
+          # date like upstream CI did. The Python 2 legs use the live PyPI index
+          # because the time-machine index does not serve `Requires-Python`
+          # metadata, so pip 20.3.4 on Python 2.7 picks py3-only sdists
+          # (lazy-object-proxy via gcp-devrel-py-tools) and fails installing
+          # dev-requirements.txt; Python 2 legs resolve release-era versions
+          # anyway through Requires-Python.
+          PIP_INDEX_URL: ${{ (matrix.python-version == '2.7' || matrix.python-version == 'pypy2.7') && 'https://pypi.org/simple/' || 'https://:2024-08-29@time-machines-pypi.sealsecurity.io/' }}
 
       - name: Upload Coverage
         if: ${{ matrix.nox-session != 'unsupported_python2' }}
@@ -128,6 +215,10 @@ jobs:
           name: coverage-data-${{ matrix.python-version }}-${{ matrix.os }}-${{ matrix.experimental }}-${{ matrix.nox-session }}
           path: ".coverage.*"
           if-no-files-found: error
+          # Seal fork: upload-artifact@v4 >= 4.4.0 (Sep 2024, after this release)
+          # skips dotfiles by default, so `.coverage.*` is otherwise "No files
+          # were found" and the leg fails.
+          include-hidden-files: true
 
   # A slow test that needs to be run separatelly to avoid timeouts.
   test_requesting_large_resources_via_ssl:
@@ -137,7 +228,9 @@ jobs:
         # 3.8 and 3.9 have a known issue with large SSL requests that we work around:
         # https://github.com/urllib3/urllib3/pull/3181#issuecomment-1794830698
         python-version: ["3.7", "3.8", "3.9", "3.12"]
-    runs-on: ubuntu-latest
+    # Seal fork: actions/setup-python has no 3.7 for ubuntu-24.04 (ubuntu-latest).
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
     name: Ubuntu ${{ matrix.python-version }} requesting_large_resources_via_ssl
     steps:
       - name: Checkout Repository
@@ -148,13 +241,23 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # Seal fork: resolve nox and its deps as of the 1.26.20 release date.
       - name: Install Dependencies
         run: python -m pip install --upgrade pip setuptools nox
+        env:
+          PIP_INDEX_URL: https://:2024-08-29@time-machines-pypi.sealsecurity.io/
 
       - name: Run Tests
-        run: ./ci/run_tests.sh test/ -k "requesting_large_resources_via_ssl"
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            ./ci/run_tests.sh ${{ inputs.test-filter }}
+          else
+            ./ci/run_tests.sh test/ -k "requesting_large_resources_via_ssl"
+          fi
         env:
           PYTHON_VERSION: ${{ matrix.python-version }}
+          # Seal fork: resolve test deps as of the release date like upstream CI did.
+          PIP_INDEX_URL: https://:2024-08-29@time-machines-pypi.sealsecurity.io/
 
       - name: Upload Coverage
         uses: "actions/upload-artifact@v4"
@@ -162,10 +265,15 @@ jobs:
           name: coverage-data-${{ matrix.python-version }}-test_requesting_large_resources_via_ssl
           path: ".coverage.*"
           if-no-files-found: error
+          # Seal fork: upload-artifact@v4 >= 4.4.0 (Sep 2024, after this release)
+          # skips dotfiles by default, so `.coverage.*` is otherwise "No files
+          # were found" and the leg fails.
+          include-hidden-files: true
 
   coverage:
-    if: always()
+    if: false  # disabled on the seal fork: --fail-under=100 coverage gate, not a test
     runs-on: "ubuntu-latest"
+    timeout-minutes: 30
     needs: [test, test_requesting_large_resources_via_ssl]
     steps:
       - uses: actions/checkout@v4

@@ -391,6 +391,13 @@ class TlsInTlsTestCase(SocketDummyServerTestCase):
             # before. After python3.7 it's a child of SSLError
             assert e.type in [ssl.SSLError, ssl.CertificateError]
 
+    @pytest.mark.skipif(
+        sys.version_info < (3, 8) and ssl.OPENSSL_VERSION_INFO >= (3, 0, 0),
+        reason="CPython < 3.8 predates OpenSSL 3; linked against OpenSSL 3 "
+        "(ubuntu-22.04 runners) the inner TLS layer raises 'unexpected eof "
+        "while reading' (bpo-38820). Upstream excluded these Pythons from "
+        "OpenSSL 3 runners for the same reason.",
+    )
     @pytest.mark.timeout(PER_TEST_TIMEOUT)
     @pytest.mark.parametrize("buffering", [None, 0])
     def test_tls_in_tls_makefile_raw_rw_binary(self, buffering):
@@ -423,6 +430,13 @@ class TlsInTlsTestCase(SocketDummyServerTestCase):
                 validate_response(str_response, binary=False)
                 file.close()
 
+    @pytest.mark.skipif(
+        sys.version_info < (3, 8) and ssl.OPENSSL_VERSION_INFO >= (3, 0, 0),
+        reason="CPython < 3.8 predates OpenSSL 3; linked against OpenSSL 3 "
+        "(ubuntu-22.04 runners) the inner TLS layer raises 'unexpected eof "
+        "while reading' (bpo-38820). Upstream excluded these Pythons from "
+        "OpenSSL 3 runners for the same reason.",
+    )
     @pytest.mark.skipif(
         platform.system() == "Windows",
         reason="Skipping windows due to text makefile support",

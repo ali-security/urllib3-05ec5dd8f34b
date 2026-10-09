@@ -1,11 +1,13 @@
 name: Downstream
 
-on: [push, pull_request, workflow_dispatch]
+on:
+  workflow_dispatch:
 
 permissions: "read-all"
 
 jobs:
   downstream:
+    if: false  # disabled on the seal fork: not part of the seal build
     strategy:
       fail-fast: false
       matrix:
