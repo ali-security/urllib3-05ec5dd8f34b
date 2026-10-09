@@ -25,7 +25,7 @@ from urllib3.exceptions import (
     httplib_IncompleteRead,
 )
 from urllib3.packages.six.moves import http_client as httplib
-from urllib3.response import HTTPResponse, brotli
+from urllib3.response import HTTPResponse, MultiDecoder, brotli
 from urllib3.util.response import is_fp_closed
 from urllib3.util.retry import RequestHistory, Retry
 
@@ -294,6 +294,35 @@ class TestResponse(object):
         r = HTTPResponse(fp, headers={"content-encoding": "gzip, gzip"})
 
         assert r.data == b"foo"
+
+    def test_read_multi_decoding_too_many_links(self):
+        fp = BytesIO(b"foo")
+        with pytest.raises(
+            DecodeError, match="Too many content encodings in the chain: 6 > 5"
+        ):
+            HTTPResponse(
+                fp,
+                headers={
+                    "content-encoding": "gzip, deflate, gzip, deflate, gzip, deflate"
+                },
+            )
+
+    def test_multi_decoding_max_links(self):
+        # A chain at the limit is still built, ...
+        assert len(MultiDecoder("gzip, deflate, gzip, deflate, gzip")._decoders) == 5
+
+        # ... but one more link is refused before any decoder is created.
+        with pytest.raises(
+            DecodeError, match="Too many content encodings in the chain: 6 > 5"
+        ):
+            MultiDecoder("gzip, deflate, gzip, deflate, gzip, deflate")
+
+        # A chain long enough to be used for resource amplification is
+        # refused as well.
+        with pytest.raises(
+            DecodeError, match="Too many content encodings in the chain: 1000 > 5"
+        ):
+            MultiDecoder(", ".join(["gzip"] * 1000))
 
     def test_body_blob(self):
         resp = HTTPResponse(b"foo")
